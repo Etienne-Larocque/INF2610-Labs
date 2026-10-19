@@ -4,13 +4,14 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 
 #define BUFFER_SIZE 4096
-static const char OUTPUT_FILE[] = "RESULTAT_PROCESS.txt";
-static const mode_t OUTPUT_MODE =
-    S_IRUSR | S_IWUSR |
-    S_IRGRP |
-    S_IROTH;
+#define TAIL_SIZE 11 // strlen("FAILED_LOGIN") - 1
+static const char OUTPUT_FILE[] = "RESULT_PROCESS.txt";
+static const mode_t OUTPUT_MODE = S_IRUSR | S_IWUSR |
+                                  S_IRGRP |
+                                  S_IROTH;
 
 typedef struct
 {
@@ -26,14 +27,6 @@ typedef struct
     int failed_login;
 } count_result_t;
 
-static void pipe_or_exit(int pipe_fds[2]) {
-    if (pipe(pipe_fds) == -1)
-    {
-        perror("pipe");
-        exit(EXIT_FAILURE);
-    }
-}
-
 static pid_t fork_or_exit() {
     pid_t child_pid = fork();
     if (child_pid == -1)
@@ -42,99 +35,6 @@ static pid_t fork_or_exit() {
         exit(EXIT_FAILURE);
     }
     return child_pid;
-}
-
-static int open_or_exit(
-    const char *path,
-    int flags,
-    mode_t mode
-)
-{
-    int fd = open(path, flags, mode);
-
-    if (fd == -1)
-    {
-        perror(path);
-        exit(EXIT_FAILURE);
-    }
-
-    return fd;
-}
-
-static int read_result(
-    int fd,
-    count_result_t *result
-)
-{
-    char *bytes = (char *)result;
-    size_t total_read = 0;
-
-    while (total_read < sizeof(*result))
-    {
-        ssize_t bytes_read = read(
-            fd,
-            bytes + total_read,
-            sizeof(*result) - total_read
-        );
-
-        if (bytes_read == -1)
-        {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-            return -1;
-        }
-
-        if (bytes_read == 0)
-        {
-            if (total_read == 0)
-            {
-                return 0;
-            }
-            return -1;
-        }
-
-        total_read += (size_t)bytes_read;
-    }
-    return 1;
-}
-
-static void close_or_exit(int fd, const char *description)
-{
-    if (close(fd) == -1)
-    {
-        perror(description);
-        exit(EXIT_FAILURE);
-    }
-}
-
-static void write_all_or_exit(
-    int fd,
-    const void *buffer,
-    size_t length,
-    const char *description
-)
-{
-    const char *bytes = buffer;
-    size_t total_written = 0;
-
-    while (total_written < length)
-    {
-        ssize_t bytes_written = write(
-            fd,
-            bytes + total_written,
-            length - total_written
-        );
-
-        if (bytes_written == -1)
-        {
-            perror(description);
-            exit(EXIT_FAILURE);
-        }
-
-        total_written += (size_t)bytes_written;
-    }
 }
 
 /* TODO */
@@ -152,51 +52,81 @@ void count_keywords_block(const char *filename, off_t start, off_t end,
     (void)prev_tail; (void)prev_len; (void)crit; (void)err; (void)fail;
 }
 
-/* TODO */
+
+
 void process_file(const char *filename, int n, const int result_fd)
 {
-    (void)filename; (void)n; (void)result_fd;
+    int file_fd = open(filename, O_RDONLY);
+    if (file_fd == -1) { perror(filename); _exit(EXIT_FAILURE); }
+
+    off_t size = lseek(file_fd, 0, SEEK_END);
+
+    for (int i = 0; i < n; i++)
+    {
+        off_t start = i * size / n;
+        off_t end = (i + 1) * size / n;
+
+        char prev_tail[TAIL_SIZE];
+        int prev_len = start < TAIL_SIZE ? (int)start : TAIL_SIZE;
+        lseek(file_fd, start - prev_len, SEEK_SET);
+        if (read(file_fd, prev_tail, prev_len) != prev_len) { prev_len = 0; }
+
+        pid_t pid = fork_or_exit();
+        if (pid == 0)
+        {
+            close(file_fd);
+            count_result_t result = {0};
+            count_keywords_block(filename, start, end, prev_tail, prev_len,
+                                 &result.critical, &result.error,
+                                 &result.failed_login);
+            write(result_fd, &result, sizeof(result));
+            _exit(EXIT_SUCCESS);
+        }
+    }
+
+    close(file_fd);
+
+    for (int i = 0; i < n; i++)
+    {
+        wait(NULL);
+    }
 }
 
-/* TODO */
+
 void process_task_wrapper(process_args_t *arg)
 {
     int result_pipe[2];
-    pipe_or_exit(result_pipe);
+    if (pipe(result_pipe) == -1) { perror("pipe"); exit(EXIT_FAILURE); }
 
     pid_t process_log1 = fork_or_exit();
     if (process_log1 == 0) {
-        close_or_exit(result_pipe[0], "log1 read end");
+        close(result_pipe[0]);
         process_file(arg->log1, arg->n, result_pipe[1]);
-        close_or_exit(result_pipe[1], "log2 write end");
+        close(result_pipe[1]);
         _exit(EXIT_SUCCESS);
     }
 
     pid_t process_log2 = fork_or_exit();
     if (process_log2 == 0) {
-        close_or_exit(result_pipe[0], "log1 read end");
+        close(result_pipe[0]);
         process_file(arg->log2, arg->n, result_pipe[1]);
-        close_or_exit(result_pipe[1], "log2 write end");
+        close(result_pipe[1]);
         _exit(EXIT_SUCCESS);
     }
 
-    close_or_exit(result_pipe[1], "parent write end");
+    close(result_pipe[1]);
 
     count_result_t total = {0};
     count_result_t result;
 
     for (;;)
     {
-        int status = read_result(result_pipe[0], &result);
+        ssize_t status = read(result_pipe[0], &result, sizeof(result));
 
-        if (status == 0)
+        if (status == 0) { break; }
+        if (status != sizeof(result))
         {
-            break;
-        }
-
-        if (status == -1)
-        {
-            fprintf(stderr, "Could not read a complete result\n");
+            perror("read");
             break; // We stop reading cause the rest could be corrupted
         }
 
@@ -205,25 +135,20 @@ void process_task_wrapper(process_args_t *arg)
         total.failed_login += result.failed_login;
     }
 
-    close_or_exit(result_pipe[0], "parent read end");
+    close(result_pipe[0]);
 
-    if (waitpid(process_log1, NULL, 0) == -1)
-    {
-        perror("waitpid log1");
-    }
+    if (waitpid(process_log1, NULL, 0) == -1) { perror("waitpid log1"); }
+    if (waitpid(process_log2, NULL, 0) == -1) { perror("waitpid log2"); }
 
-    if (waitpid(process_log2, NULL, 0) == -1)
-    {
-        perror("waitpid log2");
-    }
-
-    int output_fd = open_or_exit(
+    int output_fd = open(
         OUTPUT_FILE,
         O_CREAT | O_WRONLY | O_TRUNC,
         OUTPUT_MODE
     );
 
-    char output[BUF_SIZE];
+    if (output_fd == -1) { perror("open"); exit(EXIT_FAILURE); }
+
+    char output[64];
     int output_length = snprintf(
         output,
         sizeof(output),
@@ -235,14 +160,13 @@ void process_task_wrapper(process_args_t *arg)
         total.failed_login
     );
     
-    write_all_or_exit(
+    write(
         output_fd,
         output,
-        (size_t)output_length,
-        OUTPUT_FILE
+        (size_t)output_length
     );
 
-    close_or_exit(output_fd, "close output file");
+    close(output_fd);
 }
 
 int main(int argc, char *argv[])
