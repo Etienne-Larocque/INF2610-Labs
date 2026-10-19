@@ -1,143 +1,51 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <ctype.h>
-#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/stat.h>
 
-static const size_t BUF_SIZE = 64;
-static const char OUTPUT_FILE[] = "section2_2.txt";
-static const mode_t OUTPUT_MODE =
-    S_IRUSR | S_IWUSR |
-    S_IRGRP |
-    S_IROTH;
-
-static int open_or_exit(
-    const char *path,
-    int flags,
-    mode_t mode
-)
+void count_words(const char *input_path, const char *output_path)
 {
-    int fd = open(path, flags, mode);
+    int fd = open(input_path, O_RDONLY);
+    if (fd == -1) { perror("open input"); return; }
 
-    if (fd == -1)
+    char buffer[64];
+    ssize_t n;
+    int count = 0, in_word = 0;
+
+    while ((n = read(fd, buffer, sizeof(buffer))) > 0)
     {
-        perror(path);
-        exit(EXIT_FAILURE);
-    }
-
-    return fd;
-}
-
-static void close_or_exit(int fd, const char *description)
-{
-    if (close(fd) == -1)
-    {
-        perror(description);
-        exit(EXIT_FAILURE);
-    }
-}
-
-static void write_all_or_exit(
-    int fd,
-    const void *buffer,
-    size_t length,
-    const char *description
-)
-{
-    const char *bytes = buffer;
-    size_t total_written = 0;
-
-    while (total_written < length)
-    {
-        ssize_t bytes_written = write(
-            fd,
-            bytes + total_written,
-            length - total_written
-        );
-
-        if (bytes_written == -1)
+        for (ssize_t i = 0; i < n; i++)
         {
-            perror(description);
-            exit(EXIT_FAILURE);
-        }
-
-        total_written += (size_t)bytes_written;
-    }
-}
-
-int count_words_or_exit(char *file_path) {
-    int input_fd = open_or_exit(file_path, O_RDONLY, 0);
-
-    char buffer[BUF_SIZE];
-    ssize_t bytes_read;
-    int word_count = 0;
-    int is_inside_word = 0;
-
-    while ((bytes_read = read(input_fd, buffer, sizeof(buffer))) > 0)
-    {
-        for (ssize_t i = 0; i < bytes_read; i++) {
-            unsigned char character = (unsigned char)buffer[i];
-            if (isspace(character))
+            if (isspace((unsigned char)buffer[i]))
+                in_word = 0;
+            else if (!in_word)
             {
-                is_inside_word = 0;
-            }
-            else if (!is_inside_word)
-            {
-                is_inside_word = 1;
-                word_count++;
+                in_word = 1;
+                count++;
             }
         }
     }
-    if (bytes_read == -1)
-    {
-        perror("read input file");
-        close(input_fd);
-        exit(EXIT_FAILURE);
-    }
+    close(fd);
 
-    close_or_exit(input_fd, "output file");
+    fd = open(output_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd == -1) { perror("open output"); return; }
 
-    printf("motCount: %d\n", word_count);
-    return word_count;
+    char output[32];
+    int len = snprintf(output, sizeof(output), "%d\n", count);
+    write(fd, output, len);
+    close(fd);
+
+    printf("motCount: %d\n", count);
 }
 
-
-int main(int argc, char *argv[]) 
+int main(int argc, char *argv[])
 {
     if (argc != 2)
     {
         printf("Usage: %s <mots_file>\n", argv[0]);
-        return EXIT_SUCCESS;
+        return 1;
     }
 
-    int word_count = count_words_or_exit(argv[1]); 
-
-    int output_fd = open_or_exit(
-        OUTPUT_FILE,
-        O_CREAT | O_WRONLY | O_TRUNC,
-        OUTPUT_MODE
-    );
-
-    char output[BUF_SIZE];
-    int output_length = snprintf(
-        output,
-        sizeof(output),
-        "%d\n",
-        word_count
-    );
-    
-    write_all_or_exit(
-        output_fd,
-        output,
-        (size_t)output_length,
-        OUTPUT_FILE
-    );
-
-    close_or_exit(output_fd, "close output file");
-
-    return EXIT_SUCCESS;
+    count_words(argv[1], "section2_2.txt");
+    return 0;
 }
-
-
