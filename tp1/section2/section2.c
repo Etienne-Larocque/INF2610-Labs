@@ -37,22 +37,94 @@ static pid_t fork_or_exit() {
     return child_pid;
 }
 
-/* TODO */
-void count_in_buffer(const char *buf, int *crit, int *err, int *fail)
+int count_word(const char *buf, const char *word)
 {
-    (void)buf; (void)crit; (void)err; (void)fail;
+    int count = 0;
+
+    for (int i = 0; buf[i] != '\0'; i++) {
+        int j = 0;
+        while (word[j] != '\0' && buf[i + j] == word[j]) {
+            j++;
+        }
+        if (word[j] == '\0') {
+            count++;
+        }
+    }
+
+    return count;
 }
 
-/* TODO */
+void count_in_buffer(const char *buf, int *crit, int *err, int *fail)
+{
+    *crit += count_word(buf, "CRITICAL");
+    *err += count_word(buf, "ERROR");
+    *fail += count_word(buf, "FAILED_LOGIN");
+}
+
+// Le buffer contient [tail][données lues][\0]. On compte sur tout le buffer,
+// puis on retire ce qui est entièrement dans le tail (déjà compté avant) :
+// un mot appartient au bloc / à la lecture où il se termine.
 void count_keywords_block(const char *filename, off_t start, off_t end,
                            const char *prev_tail, int prev_len,
                            int *crit, int *err, int *fail)
 {
-    (void)filename; (void)start; (void)end;
-    (void)prev_tail; (void)prev_len; (void)crit; (void)err; (void)fail;
+    int fd = open(filename, O_RDONLY);
+    if (fd == -1) { perror(filename); return; }
+
+    if (lseek(fd, start, SEEK_SET) == -1) {
+        perror("lseek");
+        close(fd);
+        return;
+    }
+
+    char buffer[BUFFER_SIZE];
+    int tail_len = prev_len;
+    for (int i = 0; i < tail_len; i++) {
+        buffer[i] = prev_tail[i];
+    }
+
+    off_t remaining = end - start;
+
+    while (remaining > 0) {
+        size_t space = BUFFER_SIZE - 1 - tail_len;
+        size_t to_read = remaining < (off_t)space ? (size_t)remaining : space;
+
+        ssize_t bytes_read = read(fd, buffer + tail_len, to_read);
+
+        if (bytes_read == -1) {
+            perror("read");
+            close(fd);
+            return;
+        }
+        if (bytes_read == 0) { break; }
+
+        int total = tail_len + (int)bytes_read;
+        buffer[total] = '\0';
+        count_in_buffer(buffer, crit, err, fail);
+
+        // Retirer les mots entièrement dans le tail (car sont deja compté par le block ou le buffer d'avant)
+        char tail[TAIL_SIZE + 1];
+        for (int i = 0; i < tail_len; i++) {
+            tail[i] = buffer[i];
+        }
+        tail[tail_len] = '\0';
+        int tail_crit = 0, tail_err = 0, tail_fail = 0;
+        count_in_buffer(tail, &tail_crit, &tail_err, &tail_fail);
+        *crit -= tail_crit;
+        *err -= tail_err;
+        *fail -= tail_fail;
+
+        // Les derniers octets deviennent le tail de la prochaine lecture
+        tail_len = total < TAIL_SIZE ? total : TAIL_SIZE;
+        for (int i = 0; i < tail_len; i++) {
+            buffer[i] = buffer[total - tail_len + i];
+        }
+
+        remaining -= bytes_read;
+    }
+
+    close(fd);
 }
-
-
 
 void process_file(const char *filename, int n, const int result_fd)
 {
@@ -127,7 +199,7 @@ void process_task_wrapper(process_args_t *arg)
         if (status != sizeof(result))
         {
             perror("read");
-            break; // We stop reading cause the rest could be corrupted
+            break; // Le reste peut être corrompu
         }
 
         total.critical += result.critical;

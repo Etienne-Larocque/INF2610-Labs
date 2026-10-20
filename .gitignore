@@ -57,3 +57,7 @@ dkms.conf
 # Locks
 .~lock.*#
 */bin/
+
+*.clangd
+*compile_flags.txt
+.vscode
