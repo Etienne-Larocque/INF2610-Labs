@@ -5,13 +5,13 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include "timer.h"
+
+#define SEQUENTIEL 0
 
 #define BUFFER_SIZE 4096
 #define TAIL_SIZE 11 // strlen("FAILED_LOGIN") - 1
 static const char OUTPUT_FILE[] = "RESULT_PROCESS.txt";
-static const mode_t OUTPUT_MODE = S_IRUSR | S_IWUSR |
-                                  S_IRGRP |
-                                  S_IROTH;
 
 typedef struct
 {
@@ -154,19 +154,26 @@ void process_file(const char *filename, int n, const int result_fd)
             write(result_fd, &result, sizeof(result));
             _exit(EXIT_SUCCESS);
         }
+        #if SEQUENTIEL == 1
+            wait(NULL);
+        #endif
     }
 
     close(file_fd);
 
-    for (int i = 0; i < n; i++)
-    {
-        wait(NULL);
-    }
+    #if SEQUENTIEL != 1
+        for (int i = 0; i < n; i++)
+        {
+            wait(NULL);
+        }
+    #endif
 }
 
 
-void process_task_wrapper(process_args_t *arg)
+void process_task_wrapper(void *arg_ptr)
 {
+    process_args_t *arg = arg_ptr;
+
     int result_pipe[2];
     if (pipe(result_pipe) == -1) { perror("pipe"); exit(EXIT_FAILURE); }
 
@@ -177,6 +184,9 @@ void process_task_wrapper(process_args_t *arg)
         close(result_pipe[1]);
         _exit(EXIT_SUCCESS);
     }
+    #if SEQUENTIEL == 1
+        wait(NULL);
+    #endif
 
     pid_t process_log2 = fork_or_exit();
     if (process_log2 == 0) {
@@ -185,6 +195,9 @@ void process_task_wrapper(process_args_t *arg)
         close(result_pipe[1]);
         _exit(EXIT_SUCCESS);
     }
+    #if SEQUENTIEL == 1
+        wait(NULL);
+    #endif
 
     close(result_pipe[1]);
 
@@ -209,13 +222,15 @@ void process_task_wrapper(process_args_t *arg)
 
     close(result_pipe[0]);
 
-    if (waitpid(process_log1, NULL, 0) == -1) { perror("waitpid log1"); }
-    if (waitpid(process_log2, NULL, 0) == -1) { perror("waitpid log2"); }
+    #if SEQUENTIEL != 1
+        if (waitpid(process_log1, NULL, 0) == -1) { perror("waitpid log1"); }
+        if (waitpid(process_log2, NULL, 0) == -1) { perror("waitpid log2"); }
+    #endif
 
     int output_fd = open(
         OUTPUT_FILE,
         O_CREAT | O_WRONLY | O_TRUNC,
-        OUTPUT_MODE
+        S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH
     );
 
     if (output_fd == -1) { perror("open"); exit(EXIT_FAILURE); }
@@ -261,7 +276,8 @@ int main(int argc, char *argv[])
 
     system("mkdir -p tmp bin");
 
-    process_task_wrapper(&args);
+    double secondes = measure_time(process_task_wrapper, &args);
+    printf("Temps: %.4f s\n", secondes);
 
     return 0;
 }
