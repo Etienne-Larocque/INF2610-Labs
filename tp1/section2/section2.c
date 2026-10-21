@@ -62,8 +62,7 @@ void count_in_buffer(const char *buf, int *crit, int *err, int *fail)
 }
 
 // Le buffer contient [tail][données lues][\0]. On compte sur tout le buffer,
-// puis on retire ce qui est entièrement dans le tail (déjà compté avant) :
-// un mot appartient au bloc / à la lecture où il se termine.
+// et on retire ce qui est entièrement dans le tail (déjà compté avant)
 void count_keywords_block(const char *filename, off_t start, off_t end,
                            const char *prev_tail, int prev_len,
                            int *crit, int *err, int *fail)
