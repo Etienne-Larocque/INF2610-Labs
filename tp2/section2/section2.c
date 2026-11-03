@@ -8,6 +8,7 @@
 #include "../utils/timer.h"
 
 #define BUFFER_SIZE 4096
+#define TAIL_SIZE 11 // strlen("FAILED_LOGIN") - 1
 static const char OUTPUT_FILE[] = "RESULT_THR_POOL.txt";
 
 typedef struct {
@@ -18,6 +19,7 @@ typedef struct {
 
 typedef struct {
     int fd;
+    int thread_id;
     int n_blocks;
     size_t file_size;
     atomic_int* present_n;
@@ -47,6 +49,54 @@ void count_in_buffer(const char* buf, Result* res)
     res->failed += count_word(buf, "FAILED_LOGIN");
 }
 
+// Même logique qu'en section 1 : le buffer contient [tail][données lues][\0].
+// On compte sur tout le buffer, puis on retire ce qui est entièrement dans le tail
+// (déjà compté par le bloc ou la lecture d'avant).
+void count_keywords_block(int fd, off_t start, off_t end, Result* res)
+{
+    char buffer[BUFFER_SIZE];
+    int tail_len = start < TAIL_SIZE ? start : TAIL_SIZE;
+    if (pread(fd, buffer, tail_len, start - tail_len) != tail_len) {
+        tail_len = 0;
+    }
+
+    off_t remaining = end - start;
+    off_t file_offset = start;
+
+    while (remaining > 0) {
+        size_t space = BUFFER_SIZE - 1 - tail_len;
+        size_t to_read = remaining < (off_t)space ? (size_t)remaining : space;
+
+        ssize_t bytes_read = pread(fd, buffer + tail_len, to_read, file_offset);
+        if (bytes_read == -1) { perror("couldnt read right"); exit(EXIT_FAILURE); }
+        if (bytes_read == 0) { break; }
+        file_offset += bytes_read;
+
+        int total = tail_len + (int)bytes_read;
+        buffer[total] = '\0';
+        count_in_buffer(buffer, res);
+
+        char tail[TAIL_SIZE + 1];
+        for (int i = 0; i < tail_len; i++) {
+            tail[i] = buffer[i];
+        }
+        tail[tail_len] = '\0';
+        Result in_tail = { 0 };
+        count_in_buffer(tail, &in_tail);
+        res->critical -= in_tail.critical;
+        res->error -= in_tail.error;
+        res->failed -= in_tail.failed;
+
+        // Les derniers octets deviennent le tail de la prochaine lecture
+        tail_len = total < TAIL_SIZE ? total : TAIL_SIZE;
+        for (int i = 0; i < tail_len; i++) {
+            buffer[i] = buffer[total - tail_len + i];
+        }
+
+        remaining -= bytes_read;
+    }
+}
+
 void* pool_worker(void* arg) {
     PoolArgs* a = (PoolArgs*)arg;
 
@@ -55,27 +105,11 @@ void* pool_worker(void* arg) {
         if (task_n >= a->n_blocks) break;
 
         //  ----- The task -----
-        char buffer[BUFFER_SIZE];
-
-        off_t position = task_n * a->file_size / a->n_blocks;
+        off_t start = task_n * a->file_size / a->n_blocks;
         off_t end = (task_n + 1) * a->file_size / a->n_blocks;
 
-        while (position < end) {
-            size_t space = BUFFER_SIZE - 1;
-            size_t to_read = position + (off_t)space < end ? space : (size_t)(end - position);
-
-            ssize_t bytes_read = pread(a->fd, buffer, to_read, position);
-
-            if (bytes_read == 0) { break; }
-            else if (bytes_read == -1) { perror("couldnt read right"); exit(EXIT_FAILURE); }
-
-            buffer[(int)bytes_read] = '\0';
-            count_in_buffer(buffer, &a->res);
-
-            position += bytes_read;
-        }
-
-
+        printf("  thread %d -> bloc %d\n", a->thread_id, task_n);
+        count_keywords_block(a->fd, start, end, &a->res);
     }
 
     return NULL;
@@ -87,6 +121,7 @@ void process_file_pool(const char* filename, int n_blocks, int nthreads, Result*
     if (fd == -1) { perror(filename); return; }
 
     off_t file_size = lseek(fd, 0, SEEK_END);
+    printf("%s : %d blocs, %d threads\n", filename, n_blocks, nthreads);
 
     pthread_t th[nthreads];
     PoolArgs* pool_args = malloc(nthreads * sizeof(PoolArgs));
@@ -96,6 +131,7 @@ void process_file_pool(const char* filename, int n_blocks, int nthreads, Result*
         pool_args[i] = (PoolArgs)
         {
             .fd = fd,
+            .thread_id = i,
             .n_blocks = n_blocks,
             .file_size = file_size,
             .present_n = &present_n,

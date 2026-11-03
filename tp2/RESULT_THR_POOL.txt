@@ -1,0 +1,4 @@
+---------- resultats ----------
+   critical       : 412
+   error          : 502
+   failed login   : 170

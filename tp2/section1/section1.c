@@ -2,14 +2,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <string.h>
 #include <sys/stat.h>
 #include <pthread.h>
 #include "../utils/timer.h"
 
 #define BUFFER_SIZE 4096
 #define TAIL_SIZE 11 // strlen("FAILED_LOGIN") - 1
-static const char OUTPUT_FILE[] = "RESULT_PROCESS.txt";
+static const char OUTPUT_FILE[] = "RESULT_THREADS.txt";
 
 typedef struct {
     int critical;
@@ -18,7 +17,7 @@ typedef struct {
 } Result;
 
 typedef struct {
-    const char *filename;
+    int fd;
     off_t start;
     off_t end;
 } ThreadArgs;
@@ -58,7 +57,9 @@ void count_keywords_block(const int fd, off_t start, off_t end,
 {
     char buffer[BUFFER_SIZE];
     int tail_len = start < TAIL_SIZE ? start : TAIL_SIZE;
-    ssize_t bytes_read = pread(fd, buffer, tail_len, start - tail_len);
+    if (pread(fd, buffer, tail_len, start - tail_len) != tail_len) {
+        tail_len = 0;
+    }
 
     off_t remaining = end - start;
     off_t file_offset = start;
@@ -101,7 +102,6 @@ void count_keywords_block(const int fd, off_t start, off_t end,
     }
 }
 
-/* TODO*/
 void *thread_count(void *arg) {
     ThreadArgs *targ = (ThreadArgs *)arg;
     Result* res = calloc(1, sizeof(Result));
@@ -111,27 +111,18 @@ void *thread_count(void *arg) {
         return NULL;
     }
 
-    int fd = open(targ->filename, O_RDONLY);
-    if (fd == -1) {
-        perror(targ->filename);
-        free(targ);
-        return res; // Renvoie 0 partout en cas d'échec d'ouverture
-    }
-
-    count_keywords_block(fd, targ->start, targ->end,
+    count_keywords_block(targ->fd, targ->start, targ->end,
                          &res->critical, &res->error, &res->failed);
 
-    close(fd);
     free(targ);
     return (void *)res;
 }
 
-/* TODO*/
-void process_file_threads(const char *filename, int n, pthread_t *threads, size_t *total_threads) {
+// Retourne le fd du fichier, partagé par ses threads (doivent etre fermer après les pthread_join)
+int process_file_threads(const char *filename, int n, pthread_t *threads, size_t *total_threads) {
     int file_fd = open(filename, O_RDONLY);
     if (file_fd == -1) { perror(filename); _exit(EXIT_FAILURE); }
     off_t size = lseek(file_fd, 0, SEEK_END);
-    close(file_fd);
     int j;
     for (j = 0; j < n; j++) {
         off_t start = j * size / n;
@@ -139,7 +130,7 @@ void process_file_threads(const char *filename, int n, pthread_t *threads, size_
 
         ThreadArgs *targs = malloc(sizeof(ThreadArgs));
         if (!targs) { perror("malloc targs"); _exit(EXIT_FAILURE); }
-        targs->filename = filename;
+        targs->fd = file_fd;
         targs->start = start;
         targs->end = end;
 
@@ -151,9 +142,9 @@ void process_file_threads(const char *filename, int n, pthread_t *threads, size_
             (*total_threads)++;
         }
     }
+    return file_fd;
 }
 
-/* TODO */
 void thread_task_wrapper(void *arg) {
     thread_args_t *targ = (thread_args_t *)arg;
     pthread_t *threads = malloc(targ->n * 2 * sizeof(pthread_t));
@@ -161,11 +152,11 @@ void thread_task_wrapper(void *arg) {
 
     size_t total_threads = 0;
 
-    process_file_threads(targ->log1, targ->n, threads, &total_threads);
-    process_file_threads(targ->log2, targ->n, threads, &total_threads);
+    int fd1 = process_file_threads(targ->log1, targ->n, threads, &total_threads);
+    int fd2 = process_file_threads(targ->log2, targ->n, threads, &total_threads);
 
     Result total = {0};
-    for (int j = 0; j < total_threads; j++) {
+    for (size_t j = 0; j < total_threads; j++) {
         Result *result_thread;
         pthread_join(threads[j], (void **)&result_thread);
         if (result_thread != NULL) {
@@ -176,6 +167,8 @@ void thread_task_wrapper(void *arg) {
         }
     }
     free(threads);
+    close(fd1);
+    close(fd2);
 
     int output_fd = open(
         OUTPUT_FILE,
