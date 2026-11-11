@@ -25,7 +25,7 @@ static atomic_int video_id = 0;
 char *createVideo() {
     char *buf = malloc(64);
     if (!buf) { perror("malloc"); exit(1); }
-    sprintf(buf, "Video-%d", video_id++);
+    sprintf(buf, "Video-%d", atomic_fetch_add(video_id, 1));
     return buf;
 }
 void broadcastVideo(const char *video) {
@@ -101,7 +101,24 @@ void* screen(void* arg) {
  /* TODO (Section 2) : Intégrité des données lors d'une panne
  * ------------------------------------------------------------------
  */
+typedef struct {
+    pthread_t* camtid, scrtid;
+} sec_args_t;
 
+void* secondaire(void* arg) {
+    sec_args_t* args = (sec_args_t*)arg;
+    pthread_t camtid[N_CAMERAS] = args->camtid;
+    pthread_t scrtid[N_SCREENS] = args->scrttid;
+
+    while (!breakdown_flag);
+
+    for (int i = 0; i < N_CAMERAS; i++)  pthread_join(camtid[i], NULL);
+    for (int i = 0; i < N_SCREENS; i++)  pthread_join(scrtid[i], NULL);
+
+    // collects data, returns data
+
+    return NULL
+}
 
 int main(int argc, char *argv[]) {
     /*if (argc != 4) {
@@ -127,14 +144,24 @@ int main(int argc, char *argv[]) {
     sa.sa_flags = 0;
     sigaction(SIGALRM, &sa, NULL);
 
-    pthread_t camtid[N_CAMERAS], scrtid[N_SCREENS];
+    pthread_t camtid[N_CAMERAS], scrtid[N_SCREENS], sectid;
     for (int i = 0; i < N_CAMERAS; i++)  pthread_create(&camtid[i], NULL, camera, NULL);
     for (int i = 0; i < N_SCREENS; i++)  pthread_create(&scrtid[i], NULL, screen, NULL);
 
+    pthread_create(&sectid, NULL, secondaire, NULL);
+
     alarm(rand() % 11 + 5);
 
-    for (int i = 0; i < N_CAMERAS; i++)  pthread_join(camtid[i], NULL);
-    for (int i = 0; i < N_SCREENS; i++)  pthread_join(scrtid[i], NULL);
+    while (true) {
+        pthread_join(sectid, NULL);
+        // catch data to restart
+        
+        // wait for any keyboard input
+        
+        // restarts
+
+        pthread_create(&sectid, NULL, secondaire, NULL);
+    }
 
     return 0;
 }
