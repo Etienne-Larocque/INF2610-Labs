@@ -293,5 +293,6 @@ int main(int argc, char *argv[]) {
         wait_for_signal(to_pri[0]);  // le secondaire a remis les données dans la sauvegarde
         breakdown_flag = 0;
         printf("[PRINCIPAL] Redémarrage\n");
+        role = "PRINCIPAL";
     }
 }
